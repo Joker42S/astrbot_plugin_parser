@@ -292,7 +292,45 @@ class MessageSender:
         except Exception as e:
             seg_meta = self._collect_seg_meta(segs)
             logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
+            #收集segments中的所有media
+            media_list = [item["media"] for item in seg_meta if "media" in item]
+            await self._deal_blocked_media(event, media_list)
             return False
+        
+    async def _deal_blocked_media(
+        self,
+        event: AstrMessageEvent,
+        media_list: list[str]
+    ) -> bool:
+        """
+        处理被屏蔽的媒体
+        """
+        video_list = [media for media in media_list if media.endswith(('.mp4', '.mov', '.avi'))]
+        image_list = [media for media in media_list if media.endswith(('.jpg', '.jpeg', '.png', '.gif'))]
+        if image_list:
+            from urllib.parse import urlparse, unquote
+            import os
+            def normalize_path(p: str) -> str:
+                if p.startswith('file://'):
+                    parsed = urlparse(p)
+                    path = unquote(parsed.path)          # 还原 %20、%E6%B5%8B 之类的编码
+                    # Windows 下 file:///E:/xxx 解析出来是 /E:/xxx，去掉开头的 /
+                    if os.name == 'nt' and path.startswith('/') and len(path) > 2 and path[2] == ':':
+                        path = path[1:]
+                    return path
+                return p   # 不是 file:// 开头就原样返回
+            image_list = [normalize_path(p) for p in image_list]
+            try:
+                import img2pdf
+                import uuid
+                from pathlib import Path
+                pdf_path = Path(f"temp_{uuid.uuid4().hex[:8]}.pdf")
+                path_list = [Path(media) for media in image_list]
+                with open(pdf_path, "wb") as f:
+                    f.write(img2pdf.convert(path_list))
+                await event.send(event.chain_result([File(name=pdf_path.name, file=str(pdf_path.resolve().as_uri()))]))
+            except Exception as e:
+                logger.error(f"图片转换为PDF失败： error={e}")
 
     @staticmethod
     def _collect_seg_meta(segs: list[BaseMessageComponent]) -> list[dict[str, str]]:
